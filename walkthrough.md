@@ -14,7 +14,7 @@ Imagine you run a fleet of 5 electric buses in Lagos. Every day you lose money b
 
 **VoltIQ solves this with three things:**
 1. A **real-time data pipeline** that streams battery/location data every minute
-2. An **AI engine** (Claude Haiku) that reads each vehicle's situation and decides: charge now, charge later, or skip
+2. An **AI engine** (Amazon Nova Lite) that reads each vehicle's situation and decides: charge now, charge later, or skip
 3. A **live dashboard** that pushes every AI decision to the operator's browser the moment it's made
 
 The entire system runs on AWS, is written in Go, and the AI response appears on screen in under 2 seconds.
@@ -32,26 +32,26 @@ Step 2: voltiq-simulator Lambda wakes up
         → Reads 5 hardcoded vehicles (VQ-001 to VQ-005)
         → Drains each battery by 0.3–1.5% (random)
         → Nudges each GPS coordinate slightly (simulates movement)
-        → Writes 5 TelemetryEvent records to Kinesis stream "voltiq-telemetry"
+        → Sends 5 TelemetryEvent JSON messages to SQS queue "voltiq-telemetry"
         ↓
-Step 3: Kinesis triggers voltiq-processor Lambda (one call per record)
-        → Decodes the TelemetryEvent from base64 Kinesis payload
+Step 3: SQS triggers voltiq-processor Lambda (batch of up to 10 records)
+        → Decodes each TelemetryEvent from the SQS message body
         → Calls pricing.GetCurrentRateNGN(time.Now()) → e.g., 185.0 (off-peak)
         → Scans ChargingStations DynamoDB table → gets all 5 stations
         → Calculates distance from vehicle to each station (Euclidean)
         → Sorts by distance, picks the 2 nearest
         → Loads previous VehicleState from DynamoDB (for cumulative savings)
         → Builds a text prompt with: battery%, next trip time, grid rate, 2 stations
-        → Calls Claude Haiku via Bedrock → receives JSON charging decision
+        → Calls Amazon Nova Lite via Bedrock (us-east-1) → receives JSON charging decision
         → Parses decision: action, station, timing, cost, savings, reasoning
         → Adds savings to running total
         → Writes updated VehicleState back to DynamoDB
-        → Archives raw Kinesis bytes to S3
+        → Archives raw message bytes to S3
         ↓
 Step 4: DynamoDB Streams detects the VehicleState write
         → Triggers voltiq-broadcaster Lambda
         → Reads the new VehicleState image from the stream event
-        → Builds a WebSocketMessage struct
+        → Builds a WebSocketMessage struct (flat JSON)
         → Scans Connections DynamoDB table for all active browser sessions
         → Calls API Gateway PostToConnection for each session ID
         → If a session is gone (HTTP 410): deletes it from Connections table
@@ -59,6 +59,12 @@ Step 4: DynamoDB Streams detects the VehicleState write
 Step 5: Browser dashboard receives VEHICLE_UPDATE JSON
         → Updates the vehicle card: battery%, action, savings, reasoning text
         → All of this happened within ~2 seconds of the simulator firing
+
+> **Note on SQS vs Kinesis:** The original design used Kinesis Data Streams.
+> New AWS accounts require a subscription approval for Kinesis that can take days.
+> SQS is available instantly on every account and is a perfect drop-in: the simulator
+> sends JSON messages, the processor consumes them via SQS event source mapping.
+> The only code difference is `events.SQSEvent` instead of `events.KinesisEvent`.
 ```
 
 ---
@@ -89,16 +95,13 @@ The AWS SDK v2 is split into separate packages — one per service. We need:
 - `github.com/aws/aws-sdk-go-v2/service/apigatewaymanagementapi` — WebSocket PostToConnection
 - `github.com/aws/lambda-go/lambda` — Lambda handler registration
 
-**Why AWS SDK v2?**
-It is the current standard, has context support (timeouts/cancellation), and is significantly
-faster than v1.
+**Why AWS SDK v2?** It's the current standard, has context support (timeouts/cancellation), and is significantly faster than v1.
 
 ---
 
 ### `internal/models/models.go` — The Shared Data Contracts
 
-This file defines every struct that data travels through. Think of it as the "language"
-all three Lambdas speak.
+This file defines every struct that data travels through. Think of it as the "language" all three Lambdas speak.
 
 ```go
 type LatLng struct {
@@ -114,15 +117,15 @@ type TelemetryEvent struct {
     Timestamp   string  `json:"timestamp"`
     BatteryPct  float64 `json:"battery_pct"`
     Location    LatLng  `json:"location"`
-    NextTripAt  string  `json:"next_trip_at"`    // e.g. "07:00"
+    NextTripAt  string  `json:"next_trip_at"`    // "07:00"
     NextTripKM  float64 `json:"next_trip_km"`
     IsCharging  bool    `json:"is_charging"`
     OdometerKM  float64 `json:"odometer_km"`
 }
 ```
 This is what the simulator emits into Kinesis every minute for each vehicle.
-`NextTripAt` and `NextTripKM` are critical inputs to the AI — it uses them to decide
-whether there is enough time to wait for off-peak pricing.
+`NextTripAt` and `NextTripKM` are critical inputs to the AI — the AI uses them to decide
+whether there's enough time to wait for off-peak pricing.
 
 ```go
 type ChargingStation struct {
@@ -135,45 +138,42 @@ type ChargingStation struct {
     DistanceKM     float64 `json:"distance_km"` // filled at runtime, not stored
 }
 ```
-Stored in DynamoDB `ChargingStations` table. `DistanceKM` is computed at runtime by the
-processor — it is not stored in the database.
+Stored in DynamoDB `ChargingStations` table. `DistanceKM` is computed at runtime by the processor.
 
 ```go
 type ChargingDecision struct {
-    VehicleID     string  `json:"vehicle_id"`
-    Action        string  `json:"action"`          // "CHARGE_NOW", "CHARGE_LATER", "SKIP"
-    StationID     string  `json:"station_id"`
-    ChargeStartAt string  `json:"charge_start_at"`
-    ChargeEndAt   string  `json:"charge_end_at"`
-    EstCostNaira  float64 `json:"est_cost_naira"`
-    SavingsNaira  float64 `json:"savings_naira"`
-    Reasoning     string  `json:"reasoning"`
-    Confidence    float64 `json:"confidence"`
+    VehicleID    string  `json:"vehicle_id"`
+    Action       string  `json:"action"`         // "CHARGE_NOW", "CHARGE_LATER", "SKIP"
+    StationID    string  `json:"station_id"`
+    ChargeStartAt string `json:"charge_start_at"`
+    ChargeEndAt   string `json:"charge_end_at"`
+    EstCostNaira float64 `json:"est_cost_naira"`
+    SavingsNaira float64 `json:"savings_naira"`
+    Reasoning    string  `json:"reasoning"`
+    Confidence   float64 `json:"confidence"`
 }
 ```
-This is what Claude Haiku returns. The `Action` field is the key output — it drives
-everything the operator sees on the dashboard.
+This is what Amazon Nova Lite returns. The `Action` field is the key output — it drives everything the operator sees.
 
 ```go
 type VehicleState struct {
-    VehicleID       string           `dynamodbav:"VehicleID"`
-    LastSeen        string           `dynamodbav:"LastSeen"`
-    BatteryPct      float64          `dynamodbav:"BatteryPct"`
-    Location        LatLng           `dynamodbav:"Location"`
-    IsCharging      bool             `dynamodbav:"IsCharging"`
+    VehicleID       string          `dynamodbav:"VehicleID"` // DynamoDB partition key
+    LastSeen        string          `dynamodbav:"LastSeen"`
+    BatteryPct      float64         `dynamodbav:"BatteryPct"`
+    Location        LatLng          `dynamodbav:"Location"`
+    IsCharging      bool            `dynamodbav:"IsCharging"`
     LastDecision    ChargingDecision `dynamodbav:"LastDecision"`
-    TotalSavingsNGN float64          `dynamodbav:"TotalSavingsNGN"`
-    UpdatedAt       string           `dynamodbav:"UpdatedAt"`
+    TotalSavingsNGN float64         `dynamodbav:"TotalSavingsNGN"`
+    UpdatedAt       string          `dynamodbav:"UpdatedAt"`
 }
 ```
-Stored in DynamoDB `VehicleState`. Notice the `dynamodbav` tags — these tell the
-`attributevalue` package how to convert between Go structs and DynamoDB's typed attribute
-format. `TotalSavingsNGN` accumulates across every decision — this is the
-"₦28,000 saved today" number shown on the dashboard.
+This is what's stored in DynamoDB `VehicleState`. Notice the `dynamodbav` tags — these tell the
+`attributevalue` package how to marshal/unmarshal between Go structs and DynamoDB's typed attribute format.
+`TotalSavingsNGN` accumulates across every decision — this is the "₦28,000 saved today" number you show on the dashboard.
 
 ```go
 type WebSocketMessage struct {
-    Type       string  `json:"type"`        // Always "VEHICLE_UPDATE"
+    Type       string  `json:"type"`          // Always "VEHICLE_UPDATE"
     VehicleID  string  `json:"vehicle_id"`
     BatteryPct float64 `json:"battery_pct"`
     IsCharging bool    `json:"is_charging"`
@@ -188,8 +188,8 @@ type WebSocketMessage struct {
     UpdatedAt  string  `json:"updated_at"`
 }
 ```
-What gets sent over the WebSocket to the browser. Deliberately flat (no nested objects)
-so the dashboard JavaScript can parse it directly without any transformation.
+What gets sent over the WebSocket to the browser. Flat structure (no nested objects) because
+the dashboard JavaScript can parse it directly.
 
 ```go
 type Connection struct {
@@ -204,6 +204,7 @@ Minimal struct — just holds the API Gateway connection ID for each connected b
 
 ```go
 func GetCurrentRateNGN(t time.Time) float64 {
+    // Load WAT = UTC+1
     wat := time.FixedZone("WAT", 1*60*60)
     local := t.In(wat)
     hour := local.Hour()
@@ -220,28 +221,27 @@ func GetCurrentRateNGN(t time.Time) float64 {
 
 **Why does this matter?**
 
-The difference between charging at peak (₦320) vs off-peak (₦185) on a 100 kWh bus battery:
-- Peak cost:     100 × ₦320 = **₦32,000**
+The difference between charging at peak (₦320) vs off-peak (₦185) on a 100 kWh bus battery is:
+- Peak cost: 100 × ₦320 = **₦32,000**
 - Off-peak cost: 100 × ₦185 = **₦18,500**
-- **Saving per charge: ₦13,500**
+- **Saving per charge: ₦13,500** (about $9 USD)
 
-For a 5-bus fleet charging daily, that is ₦67,500/day saved purely by shifting timing.
-VoltIQ automates this decision entirely.
+For a 5-bus fleet charging daily, that's ₦67,500/day saved by just shifting timing.
+VoltIQ automates this decision.
 
-The function takes a `time.Time` parameter (not `time.Now()` directly) so it can be
-tested with specific times without depending on the system clock.
+The function takes a `time.Time` parameter (not `time.Now()` directly) so it can be tested with
+specific times without depending on the system clock.
 
 ---
 
 ### `internal/bedrock/client.go` — The AI Brain
 
-This is the most important internal package. It wraps AWS Bedrock and translates
-Go data into AI decisions.
+This is the most important internal package. It wraps AWS Bedrock and translates Go data into AI decisions.
 
-**The Client struct**
+**The Client**
 ```go
 type BedrockClient struct {
-    client  *bedrockruntime.Client
+    client *bedrockruntime.Client
     modelID string
 }
 ```
@@ -249,15 +249,16 @@ type BedrockClient struct {
 **Initialization**
 ```go
 func NewBedrockClient(region string) (*BedrockClient, error) {
-    cfg, _ := config.LoadDefaultConfig(ctx, config.WithRegion(region))
+    cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
+    // ...
     return &BedrockClient{
         client:  bedrockruntime.NewFromConfig(cfg),
-        modelID: "anthropic.claude-haiku-20240307-v1:0",
+        modelID: "amazon.nova-lite-v1:0",
     }, nil
 }
 ```
 
-**The Invoke method**
+**The Invoke Method**
 
 This builds the exact JSON payload that Bedrock's Anthropic API expects:
 
@@ -265,25 +266,26 @@ This builds the exact JSON payload that Bedrock's Anthropic API expects:
 {
   "anthropic_version": "bedrock-2023-05-31",
   "max_tokens": 500,
-  "system": "You are VoltIQ, an AI charging optimizer...",
+  "system": "You are VoltIQ, an AI charging optimizer for Nigerian electric vehicle fleets...",
   "messages": [
-    { "role": "user", "content": "<prompt built by the processor>" }
+    {
+      "role": "user",
+      "content": "<the prompt built by the processor>"
+    }
   ]
 }
 ```
 
-`max_tokens: 500` is deliberately low — the AI only needs to return a small JSON
-object, not write an essay. This keeps latency under 1 second and cost minimal.
+`max_tokens: 500` is set deliberately low — the AI only needs to return a small JSON object,
+not write an essay. This keeps latency under 1 second and cost minimal.
 
-**Why Claude Haiku?**
+**Why Amazon Nova Lite?**
 
-Haiku is the fastest and cheapest Claude model. For a Lambda that runs every minute
-on 5 vehicles (7,200 Bedrock calls/day during a demo), cost matters. The entire demo
-costs under $0.10/day in Bedrock fees alone.
+Nova Lite is Amazon's latest native model on Bedrock, offering faster reasoning and JSON output at lower cost compared to Claude Haiku. It provides excellent structure conformance for our JSON-based decision parameters.
 
 **ParseDecision**
 
-Claude sometimes wraps its JSON in markdown code fences:
+Claude sometimes wraps its JSON in markdown code fences like:
 ```
 ```json
 { ... }
@@ -292,93 +294,120 @@ Claude sometimes wraps its JSON in markdown code fences:
 
 `ParseDecision` strips these fences before unmarshalling:
 ```go
-func (b *BedrockClient) ParseDecision(raw string, vehicleID string) models.ChargingDecision {
+func (b *BedrockClient) ParseDecision(raw string, vehicleID string) ChargingDecision {
+    // Remove ```json and ``` wrappers
     clean := strings.TrimSpace(raw)
     clean = strings.TrimPrefix(clean, "```json")
     clean = strings.TrimPrefix(clean, "```")
     clean = strings.TrimSuffix(clean, "```")
-
-    var decision models.ChargingDecision
+    
+    var decision ChargingDecision
     json.Unmarshal([]byte(strings.TrimSpace(clean)), &decision)
-    decision.VehicleID = vehicleID  // inject in case Haiku omits it
+    decision.VehicleID = vehicleID  // inject since Nova Lite might omit it
     return decision
 }
 ```
 
 **The System Prompt**
+
 ```
 You are VoltIQ, an AI charging optimizer for Nigerian electric vehicle fleets.
 You optimize charging schedules based on Nigerian electricity tariffs.
 Always respond with valid JSON only. No explanations outside the JSON.
 ```
 
-The "JSON only" instruction is critical — it makes parsing reliable across all responses.
+The "JSON only" instruction is critical — it makes parsing reliable.
 
 ---
 
 ### `internal/dynamo/client.go` — The Persistence Layer
 
-All database reads and writes live here. Five functions:
+This package handles all database reads and writes. It contains 5 functions:
 
-| Function | Table | Operation | Notes |
-|---|---|---|---|
-| `GetVehicleState(id)` | VehicleState | GetItem | Returns nil if vehicle is new |
-| `PutVehicleState(state)` | VehicleState | PutItem | Upsert — replaces the full record |
-| `GetAllStations()` | ChargingStations | Scan | Returns all 5 stations |
-| `ScanConnections()` | Connections | Scan | Returns all active WebSocket session IDs |
-| `DeleteConnection(id)` | Connections | DeleteItem | Removes stale sessions (HTTP 410) |
+**`GetVehicleState`**
+```go
+func (d *DynamoClient) GetVehicleState(vehicleID string) (*models.VehicleState, error)
+```
+Performs a `GetItem` with `VehicleID` as the key. If the item doesn't exist (new vehicle),
+returns `nil, nil` — the caller handles this gracefully by starting with zero savings.
 
-The `attributevalue.MarshalMap` / `UnmarshalMap` functions handle conversion between
-Go structs and DynamoDB's typed attribute format automatically, driven by the
-`dynamodbav` struct tags.
+**`PutVehicleState`**
+```go
+func (d *DynamoClient) PutVehicleState(state models.VehicleState) error
+```
+Marshals the Go struct to DynamoDB attribute values using `attributevalue.MarshalMap`,
+then calls `PutItem`. This is an upsert — it replaces whatever was there before.
+
+**`GetAllStations`**
+```go
+func (d *DynamoClient) GetAllStations() ([]models.ChargingStation, error)
+```
+Performs a full `Scan` of the `ChargingStations` table. For our demo (5 stations),
+a Scan is fine. In production you'd use a Query with a geohash index.
+
+**`ScanConnections`**
+```go
+func (d *DynamoClient) ScanConnections() ([]models.Connection, error)
+```
+Scans the `Connections` table to get all active WebSocket connection IDs.
+
+**`DeleteConnection`**
+```go
+func (d *DynamoClient) DeleteConnection(connectionID string) error
+```
+Removes a stale connection from DynamoDB when API Gateway returns HTTP 410 (session gone).
 
 ---
 
-### `internal/kinesis/producer.go` — The Data Highway On-Ramp
+### `internal/sqs/producer.go` — The Data Highway On-Ramp
 
 ```go
-func PutTelemetryEvent(client KinesisClient, streamName string, event models.TelemetryEvent) error {
-    data, _ := json.Marshal(event)
-    _, err = client.PutRecord(ctx, &kinesis.PutRecordInput{
-        StreamName:   &streamName,
-        Data:         data,
-        PartitionKey: &event.VehicleID,
+func SendTelemetryEvent(ctx context.Context, client *sqs.Client, queueURL string, event models.TelemetryEvent) error {
+    data, err := json.Marshal(event)
+    if err != nil {
+        return err
+    }
+    body := string(data)
+    _, err = client.SendMessage(ctx, &sqs.SendMessageInput{
+        QueueUrl:    &queueURL,
+        MessageBody: &body,
     })
     return err
 }
 ```
 
-**Why `VehicleID` as partition key?**
+**Why SQS instead of Kinesis?**
 
-Kinesis guarantees ordering within a partition key. By using `VehicleID`, all telemetry
-for `VQ-003` always lands on the same shard and is processed in arrival order. This
-prevents a stale battery reading from overwriting a newer one.
+Kinesis Data Streams requires an explicit subscription approval on new AWS accounts
+(the `SubscriptionRequiredException` error). SQS Standard queues work immediately.
+For our workload (5 messages/minute), SQS is cheaper and simpler:
+- No shard management
+- No base64 encoding/decoding
+- At-least-once delivery with automatic retry
+- Free tier: 1 million messages/month
 
-**Why an interface (`KinesisClient`) instead of a concrete type?**
-
-Passing an interface instead of `*kinesis.Client` makes this function unit-testable.
-You can pass a mock in tests without hitting real AWS infrastructure.
+SQS does not guarantee strict ordering across vehicles (use FIFO queue for that),
+but since each `VehicleID` is independent, ordering between vehicles doesn't matter.
 
 ---
 
 ### `cmd/simulator/main.go` — Lambda #1: The Fleet Simulator
 
-This Lambda pretends to be a real vehicle telemetry system. It runs every minute
-via EventBridge.
+This Lambda pretends to be a real vehicle telemetry system.
 
-**Hardcoded fleet:**
+**The vehicle fleet (hardcoded):**
 ```go
 var vehicles = []vehicleSeed{
     {id: "VQ-001", lat: 6.4350, lng: 3.4717, battery: 85.0, odometer: 12450.0},
-    {id: "VQ-002", lat: 6.4281, lng: 3.4219, battery: 67.0, odometer:  8920.0},
+    {id: "VQ-002", lat: 6.4281, lng: 3.4219, battery: 67.0, odometer: 8920.0},
     {id: "VQ-003", lat: 6.6018, lng: 3.3515, battery: 45.0, odometer: 19870.0},
-    {id: "VQ-004", lat: 6.5005, lng: 3.3567, battery: 92.0, odometer:  5340.0},
+    {id: "VQ-004", lat: 6.5005, lng: 3.3567, battery: 92.0, odometer: 5340.0},
     {id: "VQ-005", lat: 6.4698, lng: 3.6034, battery: 30.0, odometer: 23100.0},
 }
 ```
 
 **Per invocation, for each vehicle:**
-1. Drain battery by 0.3–1.5% (random — simulates driving/AC usage)
+1. Drain battery by 0.3–1.5% (random, simulates driving/AC usage)
 2. Nudge GPS by ±0.001 degrees (~110 metres), simulating movement
 3. Set `NextTripAt` to "07:00" (morning shift) and `NextTripKM` to 45
 4. Emit `TelemetryEvent` to Kinesis via `kinesis.PutTelemetryEvent`
@@ -394,27 +423,29 @@ func handler(ctx context.Context, event json.RawMessage) error {
 }
 ```
 
-`lambda.Start` is the Go Lambda runtime entry point. It blocks, waiting for the
-Lambda runtime to send an event, calls `handler`, and returns the result.
+`lambda.Start` is the Go Lambda runtime entry point. It blocks, waiting for the Lambda
+runtime to send an event, calls `handler`, and returns the result.
+
+**Env var:** `KINESIS_STREAM_NAME` — avoids hardcoding the stream name.
 
 ---
 
 ### `cmd/processor/main.go` — Lambda #2: The AI Decision Engine
 
-This is the core of VoltIQ. Triggered by Kinesis — one invocation per record batch.
+This is the core of VoltIQ. It's triggered by Kinesis (one Lambda invocation per record batch).
 
-**Kinesis Event Structure**
+**The SQS Event Structure**
 ```go
-type KinesisEvent struct {
-    Records []KinesisRecord
+// events.SQSEvent from github.com/aws/aws-lambda-go/events
+type SQSEvent struct {
+    Records []SQSMessage
 }
-type KinesisRecord struct {
-    Kinesis struct {
-        Data string // base64-encoded TelemetryEvent JSON
-    }
+type SQSMessage struct {
+    Body string // raw TelemetryEvent JSON — no base64
 }
 ```
-AWS delivers Kinesis records base64-encoded. The processor decodes them first.
+Unlike Kinesis, SQS delivers the message body as plain text JSON.
+The processor unmarshals it directly: `json.Unmarshal([]byte(record.Body), &event)`
 
 **Distance Calculation**
 ```go
@@ -424,9 +455,9 @@ func distance(a, b models.LatLng) float64 {
     return math.Sqrt(dlat*dlat + dlng*dlng)
 }
 ```
-Euclidean distance — not Haversine. For Lagos distances of 5–30 km, the error
-is under 2%, which is perfectly acceptable for routing to a charging station.
-Haversine would be overkill and slower.
+This is Euclidean distance (not Haversine). For Lagos distances of 5–30km,
+the error is under 2% — fine for routing to a charging station. Haversine would
+be overkill and slower.
 
 **The Bedrock Prompt Built by the Processor**
 ```
@@ -453,19 +484,23 @@ Respond with JSON only:
 }
 ```
 
-**Savings Accumulation**
+**The Savings Accumulation Logic**
 ```go
 existing, _ := dynamoClient.GetVehicleState(event.VehicleID)
-cumulative := 0.0
+cumulativeSavings := 0.0
 if existing != nil {
-    cumulative = existing.TotalSavingsNGN
+    cumulativeSavings = existing.TotalSavingsNGN
 }
-cumulative += decision.SavingsNaira
+cumulativeSavings += decision.SavingsNaira
 
-state := models.VehicleState{TotalSavingsNGN: cumulative, ...}
+state := models.VehicleState{
+    TotalSavingsNGN: cumulativeSavings,
+    // ... other fields
+}
 dynamoClient.PutVehicleState(state)
 ```
-This is how the ₦28,000 savings counter accumulates across the whole fleet all day.
+
+This is how the ₦28,000 counter on the dashboard accumulates across the whole day.
 
 **S3 Archiving**
 ```go
@@ -476,61 +511,66 @@ s3Client.PutObject(ctx, &s3.PutObjectInput{
     Body:   bytes.NewReader(rawData),
 })
 ```
-Raw telemetry is archived as `VQ-003/2026-06-11T14:30:00Z.json`. Full audit trail,
-replayable for analysis after the event.
+Raw telemetry is archived as `VQ-003/2026-06-11T14:30:00Z.json`. This gives you
+a full audit trail and allows replaying historical data.
 
 ---
 
 ### `cmd/broadcaster/main.go` — Lambda #3: The Real-Time Pusher
 
-Bridges DynamoDB to the browser WebSocket. Triggered by DynamoDB Streams on the
-`VehicleState` table.
+This Lambda bridges DynamoDB to the browser WebSocket.
 
 **The DynamoDB Stream Event**
 
-When the processor writes a `VehicleState`, DynamoDB Streams fires:
+When `voltiq-processor` writes a `VehicleState`, DynamoDB Streams fires an event:
 ```json
 {
-  "Records": [{
-    "eventName": "MODIFY",
-    "dynamodb": {
-      "NewImage": {
-        "VehicleID":  {"S": "VQ-003"},
-        "BatteryPct": {"N": "22.5"},
-        ...
+  "Records": [
+    {
+      "eventName": "MODIFY",
+      "dynamodb": {
+        "NewImage": {
+          "VehicleID": {"S": "VQ-003"},
+          "BatteryPct": {"N": "22.5"},
+          ...
+        }
       }
     }
-  }]
+  ]
 }
 ```
-The broadcaster uses `attributevalue.UnmarshalMap` to convert `NewImage` back
-into a `models.VehicleState` struct.
+
+The broadcaster uses `attributevalue.UnmarshalMap` to convert this `NewImage`
+back into a `models.VehicleState` struct.
 
 **WebSocket Push**
 ```go
-apigwClient := apigatewaymanagementapi.NewFromConfig(cfg,
-    func(o *apigatewaymanagementapi.Options) {
-        o.BaseEndpoint = &endpoint
-    })
+apigwClient := apigatewaymanagementapi.NewFromConfig(cfg, func(o *apigatewaymanagementapi.Options) {
+    o.BaseEndpoint = &endpoint  // e.g., https://abc123.execute-api.af-south-1.amazonaws.com/prod
+})
 
-apigwClient.PostToConnection(ctx, &apigatewaymanagementapi.PostToConnectionInput{
+_, err := apigwClient.PostToConnection(ctx, &apigatewaymanagementapi.PostToConnectionInput{
     ConnectionId: &conn.ConnectionID,
     Data:         msgBytes,
 })
 ```
 
 **Handling Stale Connections**
+
+Browser tabs close. WiFi drops. When a connection is gone, API Gateway returns HTTP 410.
+The broadcaster catches this and cleans up:
 ```go
-var gone *types.GoneException
-if errors.As(err, &gone) {
-    dynamoClient.DeleteConnection(conn.ConnectionID)
-    continue
+if err != nil {
+    var gone *types.GoneException
+    if errors.As(err, &gone) {
+        dynamoClient.DeleteConnection(conn.ConnectionID)
+        continue  // skip to next connection
+    }
+    log.Printf("error posting to %s: %v", conn.ConnectionID, err)
 }
 ```
-Browser tabs close. WiFi drops. When API Gateway returns HTTP 410, the broadcaster
-removes that connection ID from DynamoDB so it is never tried again.
-Without this, the `Connections` table would fill with dead IDs and every
-broadcast would make dozens of failing API calls.
+Without this cleanup, the `Connections` table would fill with dead connection IDs
+and every broadcast would make hundreds of failing API calls.
 
 ---
 
@@ -538,46 +578,52 @@ broadcast would make dozens of failing API calls.
 
 ```bash
 #!/bin/bash
-set -e
+set -e  # stop immediately on any error
 
 REGION="af-south-1"
 FUNCTIONS=("simulator" "processor" "broadcaster")
 
 for fn in "${FUNCTIONS[@]}"; do
+    echo "==> Building voltiq-${fn}..."
+    
     GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
         go build -ldflags='-s -w' -o bootstrap ./cmd/${fn}/
-
+    
     zip ${fn}.zip bootstrap
-
+    
     aws lambda update-function-code \
         --function-name voltiq-${fn} \
         --zip-file fileb://${fn}.zip \
         --region ${REGION}
-
+    
     rm bootstrap ${fn}.zip
+    echo "==> voltiq-${fn} deployed!"
 done
 ```
 
 **Key flags explained:**
-| Flag | Meaning |
-|---|---|
-| `GOOS=linux GOARCH=arm64` | Cross-compile for Lambda's Linux ARM64 environment |
-| `CGO_ENABLED=0` | No C dependencies — fully static binary, no glibc issues |
-| `-ldflags='-s -w'` | Strip debug symbols — reduces binary size ~30% |
-| `-o bootstrap` | Lambda custom runtime requires the binary to be named exactly `bootstrap` |
+- `GOOS=linux GOARCH=arm64` — cross-compile for Lambda's Linux ARM64 environment
+- `CGO_ENABLED=0` — no C dependencies (makes the binary fully static, no glibc issues)
+- `-ldflags='-s -w'` — strip debug symbols and DWARF info, reduces binary size ~30%
+- `-o bootstrap` — AWS Lambda custom runtime expects the binary to be named exactly `bootstrap`
 
-**Why ARM64 (Graviton2)?**
-AWS Graviton2 Lambdas are ~20% faster and ~20% cheaper than x86 Lambdas.
-For a system running every minute, this compounds meaningfully over time.
+**Why ARM64?**
+
+AWS Graviton2 (ARM64) Lambdas are ~20% faster and ~20% cheaper than x86 Lambdas.
+For a system running every minute, this adds up.
 
 ---
 
 ### `scripts/seed_stations.sh` — Populating the Database
 
 ```bash
+#!/bin/bash
+REGION="af-south-1"
+TABLE="ChargingStations"
+
 aws dynamodb put-item \
-    --region af-south-1 \
-    --table-name ChargingStations \
+    --region ${REGION} \
+    --table-name ${TABLE} \
     --item '{
         "StationID":      {"S": "STN-LEKKI-A"},
         "Name":           {"S": "Lekki Station Alpha"},
@@ -592,57 +638,66 @@ aws dynamodb put-item \
 # ... repeated for all 5 stations
 ```
 
-DynamoDB CLI typed attribute format:
+DynamoDB's CLI format uses typed attributes:
 - `{"S": "value"}` — String
-- `{"N": "123"}` — Number (always quoted in JSON, DynamoDB handles the conversion)
+- `{"N": "123"}` — Number (always a string in JSON, DynamoDB handles conversion)
 - `{"M": {...}}` — Map (nested object)
+- `{"BOOL": true}` — Boolean
 
-Run this script exactly once before the demo. The stations do not change.
+Run this once before the demo. The stations don't change.
 
 ---
 
 ## 4. How the Three Lambdas Are Wired Together
 
-### The Connection Points (set up in AWS Console)
+### Connection Points (AWS Console Setup)
 
 ```
-EventBridge Rule
-  Schedule:  rate(1 minute)
-  Target:    voltiq-simulator Lambda
+EventBridge Rule: voltiq-simulator-schedule
+  → Target: voltiq-simulator Lambda
+  → Schedule: rate(1 minute)
+  → Status: ENABLED ✅
 
-Kinesis Stream: voltiq-telemetry
-  Event Source Mapping → voltiq-processor Lambda
-  Batch size: 5
+SQS Queue: voltiq-telemetry
+  → Event Source Mapping: voltiq-processor Lambda
+  → Batch size: 10
+  → Status: ENABLED ✅
 
-DynamoDB Stream: VehicleState table
-  Event Source Mapping → voltiq-broadcaster Lambda
-  Starting position: LATEST
-  Batch size: 10
+DynamoDB Stream: VehicleState table (LATEST position)
+  → Event Source Mapping: voltiq-broadcaster Lambda
+  → Batch size: 10
+  → Status: ENABLED ✅
+
+API Gateway WebSocket: voltiq-dashboard
+  → Routes: $connect, $disconnect, $default → voltiq-connector Lambda
+  → Stage: prod (auto-deploy)
+  → URL: wss://1zc6ie2yp3.execute-api.af-south-1.amazonaws.com/prod ✅
 ```
 
-The `deploy.sh` script only uploads Lambda code. The event wiring is configured
-separately in the AWS Console (or via CloudFormation/CDK).
+All wiring was provisioned via AWS CLI. The `scripts/wsl_deploy.sh` script builds and
+uploads the Go binaries from WSL Ubuntu, then `deploy.sh` switches the runtime from the
+Python placeholder to `provided.al2023`.
 
-### WebSocket Connection Registration
+### The Connection Registration (for WebSocket)
 
 When a browser connects to the API Gateway WebSocket, the `$connect` route fires.
-A small integration (Lambda or direct DynamoDB integration) writes the connection ID:
+You need a small Lambda (or API Gateway integration) that writes the `connectionId`
+to the `Connections` DynamoDB table:
 
 ```bash
-# Pseudo-code for the $connect handler
+# The $connect handler pseudo-code
 aws dynamodb put-item \
   --table-name Connections \
-  --item '{"ConnectionID": {"S": "<connectionId>"}}'
+  --item '{"ConnectionID": {"S": "<event.requestContext.connectionId>"}}'
 ```
 
-The broadcaster then finds this ID when it scans the `Connections` table and pushes
-`VEHICLE_UPDATE` messages to it.
+The broadcaster then finds this ID when it scans the `Connections` table.
 
 ---
 
 ## 5. The AI Decision — Worked Example
 
-**Input prompt sent to Claude Haiku:**
+**Input (from processor):**
 ```
 Vehicle ID: VQ-003
 Battery: 22.5%
@@ -655,7 +710,7 @@ Nearest charging stations:
 2. Victoria Island Station (STN-VICTORIA-A) - 100kW, 6 ports, 240 NGN/kWh, 2.14km away
 ```
 
-**Output from Claude Haiku:**
+**Output (from Claude Haiku):**
 ```json
 {
   "action": "CHARGE_LATER",
@@ -664,175 +719,134 @@ Nearest charging stations:
   "charge_end_at": "02:30",
   "est_cost_naira": 4162.50,
   "savings_naira": 1462.50,
-  "reasoning": "Vehicle has 22.5% battery and next trip is at 07:00. Current off-peak rate (185 NGN/kWh) is active. Recommend charging at Lekki Station Alpha from 23:00 to capture the lowest tariff window. Estimated 22.5kWh needed for 45km trip plus 20% buffer.",
+  "reasoning": "Vehicle has 22.5% battery and next trip is at 07:00. Current off-peak rate (185 NGN/kWh) is active. Recommend charging at Lekki Station Alpha from 23:00 to capture lowest tariff window. Estimated 22.5kWh needed for 45km trip plus 20% buffer.",
   "confidence": 0.91
 }
 ```
 
-**The maths behind it:**
-- 45 km trip at ~500 Wh/km (Lagos bus) = 22.5 kWh needed
-- Charging now at station rate (₦225/kWh): 22.5 × 225 = **₦5,062.50**
-- Charging at 23:00 off-peak (₦185/kWh): 22.5 × 185 = **₦4,162.50**
-- **Saving: ₦900** on this single charge cycle, automatically
+**The reasoning:** 
+- 45km trip needs ~22.5kWh (assuming 500Wh/km for a bus)
+- Charging now at ₦225/kWh (station price) = ₦5,062.50
+- Charging at 23:00 when off-peak (₦185/kWh) = ₦4,162.50
+- **Saving: ₦900** just by waiting 2 hours
+
+(The AI does this math implicitly from the prompt context.)
 
 ---
 
 ## 6. Error Handling Strategy
 
 Each Lambda follows this pattern:
-
-| Concern | Approach |
-|---|---|
-| Log everything | `log.Printf` writes to CloudWatch automatically |
-| No panics | Use `errors.As` and error returns throughout |
-| Partial failure | If Bedrock fails for VQ-003, continue processing VQ-004 |
-| Stale connections | Broadcaster removes dead WebSocket sessions on HTTP 410 |
-| New vehicles | Processor handles vehicles with no existing state (starts at 0 savings) |
+1. **Log everything** — `log.Printf` writes to CloudWatch automatically
+2. **Don't panic** — use `errors.As` / error returns, not panics
+3. **Continue on partial failure** — if Bedrock fails for VQ-003, still process VQ-004
+4. **Stale connection cleanup** — broadcaster removes dead WebSocket sessions
+5. **Nil-safe state loading** — processor handles first-time vehicles (no existing state)
 
 ---
 
-## 7. Cost Estimate for Demo Day (June 11, 2026)
+## 7. Cost Estimate for the Demo Day (June 11)
 
-| Service | Usage | Daily Cost |
+| Service | Usage | Cost |
 |---|---|---|
 | Lambda invocations | ~4,320/day (3 × 5 × 288) | ~$0.01 |
-| Kinesis | 1 shard × 24h | ~$0.36 |
+| SQS | ~1,440 messages/day | Free tier |
 | DynamoDB | ~50,000 reads/writes | ~$0.05 |
 | Bedrock (Haiku) | ~1,440 calls × 500 tokens | ~$0.10 |
 | S3 | ~1,440 small objects | ~$0.01 |
 | API Gateway WebSocket | ~1,440 messages | ~$0.01 |
-| **Total** | | **~$0.54/day** |
+| EventBridge | 1,440 rule invocations | Free tier |
+| **Total** | | **~$0.18/day** |
 
-The entire demo costs about 54 cents a day. AWS Free Tier covers most of this.
-
----
-
-## 8. Tips for the Presentation (June 11)
-
-1. **The ₦28,000 number** — `TotalSavingsNGN` is the sum across all 5 vehicles. Pre-seed
-   VQ-003 with `TotalSavingsNGN: 5600` etc. in DynamoDB before the demo so the counter
-   already looks realistic when judges arrive.
-
-2. **The AI reasoning text** lives in `WebSocketMessage.Reasoning`. Display it prominently
-   on the dashboard. This is the moment that impresses the judges most.
-
-3. **Pre-warm Bedrock** — invoke the simulator 2–3 times before judges arrive. Bedrock
-   has a cold-start delay on the first call; subsequent calls are fast.
-
-4. **If a WebSocket drops** — refreshing the browser registers a new connection ID.
-   The old one gets cleaned up automatically on the next broadcast.
-
-5. **VQ-003 is your demo vehicle** — per the demo script. Set it to 22% battery in
-   DynamoDB before the presentation so it triggers a `CHARGE_LATER` decision on cue.
+The entire demo costs about 54 cents a day. AWS Free Tier will cover most of this.
 
 ---
 
-## 9. Why Go on Lambda?
+## 8. Things to Know for the Presentation
 
-Go compiles to a single static binary. AWS Lambda's `provided.al2023` runtime runs
-any binary named `bootstrap`. No interpreter, no runtime dependency, no Docker image.
+1. **The ₦28,000 savings number** is the `TotalSavingsNGN` field summed across all 5 vehicles over ~10 hours of the simulator running. Seed VQ-003 with `TotalSavingsNGN: 5600` etc. in DynamoDB before the demo for a realistic starting number.
+
+2. **The AI reasoning text** appears in `WebSocketMessage.Reasoning` — your dashboard should display this prominently. It's the "wow moment" for judges.
+
+3. **If Bedrock is slow** (cold start), the processor Lambda will appear to hang. Pre-warm by invoking the simulator 2–3 times before the judges arrive.
+
+4. **If a WebSocket connection drops** during the demo, refreshing the browser re-registers a new connection ID. The old one gets cleaned up automatically on the next broadcast.
+
+5. **VQ-003 is your demo vehicle** — per the demo script. Set it to 22% battery in DynamoDB before the presentation so it triggers a `CHARGE_LATER` decision on cue.
+
+---
+
+## 9. What "Go on Lambda" Means (for context)
+
+Go compiles to a single static binary. AWS Lambda's `provided.al2023` runtime runs any binary
+called `bootstrap`. So the workflow is:
 
 ```
-go build → binary named "bootstrap" → zip it → upload to Lambda
+go build → single binary called "bootstrap" → zip it → upload to Lambda
 ```
 
-Go Lambda performance compared to alternatives:
+There's no interpreter, no runtime dependency, no Docker image needed.
+Go Lambdas typically have:
+- **Cold start**: 50–200ms (vs 1–2 seconds for Python/Node)
+- **Memory usage**: 30–60MB (vs 100–300MB for JVM runtimes)
+- **Execution time**: typically 200–500ms for our workload
 
-| Runtime | Cold Start | Memory | Cost |
+This is why Go is the right choice for a high-frequency event pipeline like VoltIQ.
+
+---
+
+## 10. Full Deployment Status (as of June 3, 2026)
+
+### Infrastructure Provisioned
+
+| Resource | Name | Region | Status |
 |---|---|---|---|
-| Go (arm64) | 50–200ms | 30–60MB | Lowest |
-| Python 3.12 | 300–800ms | 80–120MB | Low |
-| Node.js 20 | 200–600ms | 60–100MB | Low |
-| Java 21 | 1,000–3,000ms | 200–400MB | Higher |
+| DynamoDB table | VehicleState | af-south-1 | ✅ Live (streams ON) |
+| DynamoDB table | ChargingStations | af-south-1 | ✅ 5 Lagos stations seeded |
+| DynamoDB table | Connections | af-south-1 | ✅ Live |
+| SQS queue | voltiq-telemetry | af-south-1 | ✅ Live |
+| S3 bucket | voltiq-telemetry-archive-376791751274 | af-south-1 | ✅ Live |
+| Lambda | voltiq-simulator | af-south-1 | ✅ Go binary, provided.al2023 |
+| Lambda | voltiq-processor | af-south-1 | ✅ Go binary, provided.al2023 |
+| Lambda | voltiq-broadcaster | af-south-1 | ✅ Go binary, provided.al2023 |
+| Lambda | voltiq-connector | af-south-1 | ✅ Python 3.12 |
+| API Gateway | voltiq-dashboard (WebSocket) | af-south-1 | ✅ prod stage |
+| EventBridge rule | voltiq-simulator-schedule | af-south-1 | ✅ rate(1 minute) |
+| IAM role | voltiq-lambda-role | global | ✅ All policies attached |
 
-For a pipeline that fires every 60 seconds across 5 vehicles, Go is the correct choice.
-The 5x faster cold start means the first tick of each deployment feels instant.
+### Lambda Environment Variables
+
+| Lambda | Env Var | Value |
+|---|---|---|
+| simulator | SQS_QUEUE_URL | https://sqs.af-south-1.amazonaws.com/376791751274/voltiq-telemetry |
+| processor | DYNAMO_REGION | af-south-1 |
+| processor | BEDROCK_REGION | us-east-1 |
+| processor | S3_BUCKET | voltiq-telemetry-archive-376791751274 |
+| broadcaster | DYNAMO_REGION | af-south-1 |
+| broadcaster | APIGW_ENDPOINT | https://1zc6ie2yp3.execute-api.af-south-1.amazonaws.com/prod |
+| connector | DYNAMO_REGION | af-south-1 |
+
+### Verified Live Data (from DynamoDB scan after first EventBridge tick)
+
+```
+VQ-001 → battery: 82.5%   ✅
+VQ-002 → battery: 64.4%   ✅
+VQ-003 → battery: 18.6%   ✅ (critically low — AI will CHARGE_NOW)
+VQ-004 → battery: 88.2%   ✅
+VQ-005 → battery: 33.6%   ✅
+SQS queue depth: 0 (all messages consumed by processor) ✅
+```
+
+### Dashboard
+
+File: `dashboard.html` — open directly in any browser.
+- Connects to WebSocket at `wss://1zc6ie2yp3.execute-api.af-south-1.amazonaws.com/prod`
+- Shows live battery gauges for all 5 vehicles
+- Displays AI decisions (CHARGE_NOW / CHARGE_LATER / SKIP) in real time
+- Shows accumulating ₦ savings counter
+- Lagos fleet map with vehicle and station positions
+- Auto-reconnects if WebSocket drops
 
 ---
 
-*End of Walkthrough*
-*VoltIQ · Arthurite Integrated · ONE WITH AI Hackathon 2026 · Lagos, Nigeria*
-
----
-
-## 10. Build Log — What Actually Happened
-
-This section is a live record of the actual build process, including issues found and fixed.
-
-### go mod tidy
-
-Ran successfully. Resolved and locked all 9 direct dependencies:
-
-| Package | Version |
-|---|---|
-| `github.com/aws/aws-lambda-go` | v1.54.0 |
-| `github.com/aws/aws-sdk-go-v2` | v1.41.9 |
-| `github.com/aws/aws-sdk-go-v2/config` | v1.32.20 |
-| `github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue` | v1.20.42 |
-| `github.com/aws/aws-sdk-go-v2/service/apigatewaymanagementapi` | v1.29.18 |
-| `github.com/aws/aws-sdk-go-v2/service/bedrockruntime` | v1.53.1 |
-| `github.com/aws/aws-sdk-go-v2/service/dynamodb` | v1.57.6 |
-| `github.com/aws/aws-sdk-go-v2/service/kinesis` | v1.43.9 |
-| `github.com/aws/aws-sdk-go-v2/service/s3` | v1.102.2 |
-
-### go list ./...
-
-Passed EXIT 0. All 8 packages resolved correctly:
-```
-github.com/voltiq/voltiq/cmd/broadcaster
-github.com/voltiq/voltiq/cmd/processor
-github.com/voltiq/voltiq/cmd/simulator
-github.com/voltiq/voltiq/internal/bedrock
-github.com/voltiq/voltiq/internal/dynamo
-github.com/voltiq/voltiq/internal/kinesis
-github.com/voltiq/voltiq/internal/models
-github.com/voltiq/voltiq/internal/pricing
-```
-
-### go vet ./... — Two Issues Found and Fixed
-
-**Issue 1: simulator/main.go — self-assignment**
-```go
-// Before (flagged by vet):
-odometer = odometer // odometer not stored in VehicleState
-
-// After (fixed):
-// odometer is not stored in VehicleState — seed value is kept as-is
-```
-Just a dead line. Removed it. Odometer value is already the seed value; no assignment needed.
-
-**Issue 2: processor/main.go — wrong Kinesis event type**
-```go
-// Before (type error):
-func processRecord(ctx context.Context, record events.KinesisRecord) error {
-    rawData := record.Kinesis.Data  // KinesisRecord has no .Kinesis field!
-
-// After (fixed):
-func processRecord(ctx context.Context, record events.KinesisEventRecord) error {
-    rawData := record.Kinesis.Data  // KinesisEventRecord.Kinesis is the KinesisRecord
-```
-The `events.KinesisEvent.Records` slice contains `events.KinesisEventRecord` (the outer
-envelope with EventID, AwsRegion, etc.). The inner `events.KinesisRecord` is accessed
-via `.Kinesis` on the outer struct. Wrong type was passed to `processRecord`.
-
-**After fixes: `go vet ./...` → EXIT 0, zero warnings. ✅**
-
-### go build ./... — Windows Policy Blocked
-
-`go build` failed on the local Windows machine because Windows Application Control
-(WDAC) policy blocked the Go linker (`link.exe`) from executing. **This is a machine
-security policy, not a code error.**
-
-Evidence that the code is correct despite this:
-- `go vet ./...` runs the full type checker (same as the compiler) and passed cleanly
-- `go list ./...` resolved all imports and package graphs correctly
-- `go mod tidy` validated all dependency declarations
-
-**To run `go build` locally**, either:
-1. Use WSL (Windows Subsystem for Linux) — not affected by WDAC
-2. Run from an Administrator PowerShell with WDAC exemption
-3. Build on a Linux machine / CI environment
-
-**The deploy script (`scripts/deploy.sh`) uses `GOOS=linux GOARCH=arm64` cross-compilation
-and should be run from a Linux environment (WSL, CI, or GitHub Actions) anyway.**
-
+*End of Walkthrough · VoltIQ · Built for AWS Hackathon · June 2026*
