@@ -1,0 +1,29 @@
+# Binaries and packaging
+bootstrap
+*.zip
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Operating system files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Environment/Credentials/Cache
+.env
+.env.*
+.aws/
+credentials
+config
+*.log
+
+# WSL/Deploy temporary build files
+scripts/.api_id
+scripts/.mgmt_url
+scripts/.ws_url

@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VoltIQ — Lagos EV Fleet Intelligence</title>
+  <meta name="description" content="Real-time AI-powered EV fleet management for Lagos. VoltIQ uses AWS Bedrock Claude to optimise charging decisions and reduce energy costs.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg:        #040c1a;
+      --bg-card:   rgba(0,212,170,0.04);
+      --border:    rgba(0,212,170,0.13);
+      --border-hi: rgba(0,212,170,0.35);
+      --teal:   #00d4aa;
+      --red:    #ff3366;
+      --amber:  #ffaa00;
+      --green:  #00e87a;
+      --blue:   #4d9fff;
+      --text:   #e0eaff;
+      --muted:  #5a6d9a;
+      --dim:    #2a3557;
+      --mono: 'JetBrains Mono', monospace;
+    }
+    *{margin:0;padding:0;box-sizing:border-box;}
+    html{scroll-behavior:smooth;}
+    body{
+      background:var(--bg);
+      color:var(--text);
+      font-family:'Inter',sans-serif;
+      min-height:100vh;
+      overflow-x:hidden;
+    }
+    /* Grid background */
+    body::before{
+      content:'';position:fixed;inset:0;
+      background-image:
+        linear-gradient(rgba(0,212,170,.025) 1px,transparent 1px),
+        linear-gradient(90deg,rgba(0,212,170,.025) 1px,transparent 1px);
+      background-size:60px 60px;
+      pointer-events:none;z-index:0;
+    }
+    /* Glow orb top-right */
+    body::after{
+      content:'';position:fixed;top:-200px;right:-200px;
+      width:600px;height:600px;
+      background:radial-gradient(circle,rgba(0,212,170,.07) 0%,transparent 70%);
+      pointer-events:none;z-index:0;
+    }
+
+    .wrap{position:relative;z-index:1;max-width:1560px;margin:0 auto;padding:0 28px;}
+
+    /* ── HEADER ─────────────────────────────── */
+    header{
+      position:sticky;top:0;z-index:100;
+      background:rgba(4,12,26,.9);
+      backdrop-filter:blur(24px);
+      border-bottom:1px solid var(--border);
+    }
+    .header-inner{
+      display:flex;align-items:center;justify-content:space-between;
+      padding:14px 0;
+    }
+    .logo{display:flex;align-items:center;gap:12px;}
+    .logo-icon{
+      width:38px;height:38px;
+      background:linear-gradient(135deg,#00d4aa,#00a0ff);
+      border-radius:10px;
+      display:flex;align-items:center;justify-content:center;
+      font-size:20px;font-weight:900;color:#040c1a;
+    }
+    .logo-texts{display:flex;flex-direction:column;}
+    .logo-name{font-size:20px;font-weight:900;letter-spacing:-0.5px;color:#fff;}
+    .logo-name em{color:var(--teal);font-style:normal;}
+    .logo-tagline{font-size:11px;color:var(--muted);margin-top:1px;}
+    .header-right{display:flex;align-items:center;gap:16px;}
+    .ws-pill{
+      display:flex;align-items:center;gap:7px;
+      padding:6px 14px;border-radius:20px;
+      background:rgba(0,212,170,.08);
+      border:1px solid var(--border);
+      font-size:11px;font-weight:700;
+      font-family:var(--mono);letter-spacing:.5px;
+    }
+    .ws-dot{
+      width:8px;height:8px;border-radius:50%;
+      background:var(--teal);
+      animation:dotpulse 2s ease-in-out infinite;
+    }
+    .ws-dot.err{background:var(--red);animation:none;}
+    .ws-dot.loading{background:var(--amber);}
+    #ws-label{color:var(--teal);}
+    .header-time{
+      font-size:11px;color:var(--muted);font-family:var(--mono);
+    }
+
+    /* ── STATS BAR ───────────────────────────── */
+    .stats-bar{
+      display:grid;grid-template-columns:repeat(4,1fr);
+      gap:16px;padding:24px 0 20px;
+    }
+    .stat-card{
+      background:var(--bg-card);
+      border:1px solid var(--border);
+      border-radius:18px;padding:20px 24px;
+      position:relative;overflow:hidden;
+      transition:border-color .3s,box-shadow .3s;
+    }
+    .stat-card:hover{border-color:var(--border-hi);}
+    .stat-card::before{
+      content:'';position:absolute;
+      top:0;left:0;right:0;height:2px;
+      background:linear-gradient(90deg,var(--teal) 0%,transparent 60%);
+    }
+    .stat-label{
+      font-size:10px;font-weight:700;letter-spacing:1.5px;
+      text-transform:uppercase;color:var(--muted);margin-bottom:10px;
+    }
+    .stat-value{
+      font-size:40px;font-weight:900;
+      font-family:var(--mono);letter-spacing:-2px;
+      color:#fff;line-height:1;
+    }
+    .stat-value.c-teal{color:var(--teal);}
+    .stat-value.c-green{color:var(--green);}
+    .stat-value.c-amber{color:var(--amber);}
+    .stat-sub{font-size:12px;color:var(--muted);margin-top:8px;}
+    .stat-delta{
+      font-size:10px;font-family:var(--mono);
+      padding:2px 8px;border-radius:10px;
+      background:rgba(0,232,122,.1);color:var(--green);
+      display:inline-block;margin-top:6px;
+    }
+
+    /* ── FLEET GRID ──────────────────────────── */
+    .section-title{
+      font-size:11px;font-weight:700;letter-spacing:2px;
+      text-transform:uppercase;color:var(--muted);
+      display:flex;align-items:center;gap:10px;
+      margin-bottom:16px;
+    }
+    .section-title::after{
+      content:'';flex:1;height:1px;background:var(--border);
+    }
+    .fleet-grid{
+      display:grid;grid-template-columns:repeat(5,1fr);
+      gap:16px;margin-bottom:24px;
+    }
+    .v-card{
+      background:var(--bg-card);
+      border:1px solid var(--border);
+      border-radius:20px;padding:24px 18px 20px;
+      display:flex;flex-direction:column;align-items:center;
+      gap:14px;transition:all .4s ease;
+      position:relative;overflow:hidden;
+    }
+    .v-card::before{
+      content:'';position:absolute;
+      inset:0;border-radius:20px;
+      background:linear-gradient(135deg,rgba(0,212,170,.04) 0%,transparent 50%);
+      pointer-events:none;
+    }
+    .v-card.updated{
+      border-color:var(--teal);
+      box-shadow:0 0 30px rgba(0,212,170,.18);
+    }
+    .v-card.critical{
+      border-color:var(--red);
+      box-shadow:0 0 30px rgba(255,51,102,.18);
+      animation:critpulse 3s ease-in-out infinite;
+    }
+    .v-card.warn{
+      border-color:var(--amber);
+      box-shadow:0 0 20px rgba(255,170,0,.1);
+    }
+    .vid{
+      font-family:var(--mono);font-size:13px;font-weight:700;
+      color:var(--teal);letter-spacing:1.5px;
+    }
+
+    /* Battery gauge */
+    .gauge-wrap{position:relative;width:120px;height:120px;}
+    .gauge-wrap svg{width:100%;height:100%;}
+    .g-bg{fill:none;stroke:rgba(255,255,255,.06);stroke-width:10;}
+    .g-fill{
+      fill:none;stroke-width:10;stroke-linecap:round;
+      transform-origin:center;transform:rotate(-90deg);
+      transition:stroke-dasharray 1.5s cubic-bezier(.4,0,.2,1),stroke .5s;
+    }
+    .gauge-center{
+      position:absolute;inset:0;
+      display:flex;flex-direction:column;align-items:center;justify-content:center;
+    }
+    .g-pct{
+      font-size:26px;font-weight:900;font-family:var(--mono);
+      line-height:1;letter-spacing:-1px;
+    }
+    .g-unit{font-size:10px;color:var(--muted);margin-top:2px;}
+
+    /* Action badge */
+    .badge{
+      padding:5px 14px;border-radius:20px;
+      font-size:10px;font-weight:800;letter-spacing:.8px;
+      text-transform:uppercase;
+    }
+    .badge.now{background:rgba(255,51,102,.15);color:var(--red);border:1px solid rgba(255,51,102,.4);}
+    .badge.later{background:rgba(255,170,0,.15);color:var(--amber);border:1px solid rgba(255,170,0,.4);}
+    .badge.skip{background:rgba(0,232,122,.1);color:var(--green);border:1px solid rgba(0,232,122,.3);}
+    .badge.waiting{background:rgba(90,109,154,.1);color:var(--muted);border:1px solid var(--border);}
+
+    /* Info rows */
+    .v-info{width:100%;display:flex;flex-direction:column;gap:5px;}
+    .v-row{
+      display:flex;justify-content:space-between;align-items:center;
+      font-size:11px;padding-bottom:5px;
+      border-bottom:1px solid rgba(255,255,255,.04);
+    }
+    .v-row:last-child{border-bottom:none;}
+    .vr-k{color:var(--muted);}
+    .vr-v{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--text);}
+    .vr-v.g{color:var(--green);font-weight:700;}
+
+    /* ── BOTTOM PANEL ────────────────────────── */
+    .bottom-panel{display:grid;grid-template-columns:1fr 360px;gap:16px;margin-bottom:32px;}
+    .panel{
+      background:var(--bg-card);
+      border:1px solid var(--border);
+      border-radius:20px;padding:22px;
+    }
+    .panel-hdr{
+      font-size:11px;font-weight:700;letter-spacing:1.5px;
+      text-transform:uppercase;color:var(--muted);
+      display:flex;align-items:center;gap:10px;
+      margin-bottom:18px;
+    }
+    .panel-hdr::before{
+      content:'';display:inline-block;
+      width:4px;height:16px;
+      background:var(--teal);border-radius:2px;
+    }
+
+    /* Feed */
+    .feed{display:flex;flex-direction:column;gap:10px;max-height:310px;overflow-y:auto;}
+    .feed-item{
+      display:flex;align-items:flex-start;gap:12px;
+      padding:12px 14px;
+      background:rgba(255,255,255,.02);
+      border-radius:12px;
+      border-left:3px solid var(--dim);
+      animation:slideIn .3s ease;
+    }
+    .fi-now{border-left-color:var(--red);}
+    .fi-later{border-left-color:var(--amber);}
+    .fi-skip{border-left-color:var(--green);}
+    .fi-vid{
+      font-family:var(--mono);font-size:12px;
+      font-weight:700;color:var(--teal);min-width:58px;
+    }
+    .fi-body{flex:1;}
+    .fi-action{font-size:12px;font-weight:700;margin-bottom:3px;}
+    .fi-reason{font-size:11px;color:var(--muted);line-height:1.5;
+      display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+    .fi-time{font-family:var(--mono);font-size:10px;color:var(--dim);margin-top:5px;}
+    .feed-empty{
+      color:var(--muted);font-size:13px;text-align:center;
+      padding:40px 0;font-style:italic;
+    }
+
+    /* Map */
+    .map-title{
+      display:flex;justify-content:space-between;align-items:center;
+      margin-bottom:14px;
+    }
+    .map-legend{display:flex;gap:12px;font-size:10px;color:var(--muted);}
+    .legend-dot{
+      display:inline-block;width:8px;height:8px;
+      border-radius:50%;margin-right:4px;
+    }
+    .map-svg-wrap{
+      background:rgba(0,20,50,.6);
+      border-radius:14px;overflow:hidden;
+      border:1px solid var(--border);
+    }
+    #lagos-map{width:100%;height:auto;display:block;}
+
+    /* ── FOOTER ──────────────────────────────── */
+    footer{
+      border-top:1px solid var(--border);
+      padding:16px 0 28px;
+      display:flex;justify-content:space-between;align-items:center;
+      font-size:11px;color:var(--dim);
+    }
+    .footer-left{display:flex;align-items:center;gap:8px;}
+
+    /* ── ANIMATIONS ──────────────────────────── */
+    @keyframes dotpulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.4;transform:scale(.7);}}
+    @keyframes critpulse{0%,100%{box-shadow:0 0 20px rgba(255,51,102,.15);}50%{box-shadow:0 0 50px rgba(255,51,102,.4);}}
+    @keyframes slideIn{from{opacity:0;transform:translateX(-12px);}to{opacity:1;transform:translateX(0);}}
+    @keyframes numFlash{0%,100%{color:inherit;}50%{color:#fff;}}
+
+    /* Scrollbar */
+    ::-webkit-scrollbar{width:4px;}
+    ::-webkit-scrollbar-track{background:transparent;}
+    ::-webkit-scrollbar-thumb{background:var(--dim);border-radius:2px;}
+  </style>
+</head>
+<body>
+
+<!-- ── HEADER ─────────────────────────────────── -->
+<header>
+  <div class="wrap header-inner">
+    <div class="logo">
+      <div class="logo-icon">⚡</div>
+      <div class="logo-texts">
+        <div class="logo-name"><em>Volt</em>IQ</div>
+        <div class="logo-tagline">Lagos EV Fleet Intelligence · Powered by AWS Bedrock</div>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="ws-pill">
+        <div class="ws-dot loading" id="ws-dot"></div>
+        <span id="ws-label">CONNECTING</span>
+      </div>
+      <div class="header-time" id="clock">--:--:--</div>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <!-- ── STATS BAR ─────────────────────────────── -->
+  <div class="stats-bar">
+    <div class="stat-card">
+      <div class="stat-label">Fleet Online</div>
+      <div class="stat-value c-teal" id="stat-fleet">5</div>
+      <div class="stat-sub">vehicles active</div>
+      <div class="stat-delta">▲ all systems go</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Avg Battery</div>
+      <div class="stat-value" id="stat-avg">--</div>
+      <div class="stat-sub">fleet average</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">AI Decisions</div>
+      <div class="stat-value c-teal" id="stat-decisions">0</div>
+      <div class="stat-sub">this session</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Total Savings</div>
+      <div class="stat-value c-green" id="stat-savings">₦0</div>
+      <div class="stat-sub">optimised spend</div>
+    </div>
+  </div>
+
+  <!-- ── FLEET GRID ──────────────────────────────── -->
+  <div class="section-title">Live Fleet Status · af-south-1</div>
+  <div class="fleet-grid" id="fleet-grid">
+    <!-- JS renders vehicle cards here -->
+  </div>
+
+  <!-- ── BOTTOM PANEL ───────────────────────────── -->
+  <div class="bottom-panel">
+
+    <!-- Decision Feed -->
+    <div class="panel">
+      <div class="panel-hdr">AI Decision Feed</div>
+      <div class="feed" id="feed">
+        <div class="feed-empty" id="feed-empty">Waiting for first AI decision from Claude Haiku…</div>
+      </div>
+    </div>
+
+    <!-- Lagos Map -->
+    <div class="panel">
+      <div class="map-title">
+        <div class="panel-hdr" style="margin-bottom:0">Lagos Fleet Map</div>
+        <div class="map-legend">
+          <span><span class="legend-dot" style="background:var(--teal)"></span>Station</span>
+          <span><span class="legend-dot" style="background:#fff"></span>Vehicle</span>
+        </div>
+      </div>
+      <div class="map-svg-wrap">
+        <svg id="lagos-map" viewBox="0 0 340 300" xmlns="http://www.w3.org/2000/svg">
+          <!-- Water background -->
+          <rect width="340" height="300" fill="#031120"/>
+          <!-- Lagos Lagoon / Atlantic simplified -->
+          <path d="M0,240 Q60,220 120,235 Q180,250 240,230 Q300,210 340,225 L340,300 L0,300 Z"
+                fill="rgba(0,80,160,0.4)" opacity="0.6"/>
+          <!-- Mainland mass -->
+          <path d="M0,0 L340,0 L340,200 Q280,190 240,195 Q180,200 130,185 Q80,175 40,190 Q20,195 0,200 Z"
+                fill="rgba(15,35,65,0.8)"/>
+          <!-- Lagos Island ridge -->
+          <path d="M80,220 Q110,210 150,215 Q190,220 220,215 Q240,212 250,218 Q230,228 200,232 Q160,238 120,232 Q95,228 80,220 Z"
+                fill="rgba(20,50,80,0.9)" stroke="rgba(0,100,180,0.3)" stroke-width="1"/>
+          <!-- Lekki peninsula -->
+          <path d="M215,215 Q255,208 300,212 Q330,215 340,218 L340,226 Q305,224 270,222 Q240,220 215,220 Z"
+                fill="rgba(20,50,80,0.9)"/>
+
+          <!-- Grid lines -->
+          <line x1="0" y1="100" x2="340" y2="100" stroke="rgba(0,212,170,.05)" stroke-width="1"/>
+          <line x1="0" y1="200" x2="340" y2="200" stroke="rgba(0,212,170,.05)" stroke-width="1"/>
+          <line x1="100" y1="0" x2="100" y2="300" stroke="rgba(0,212,170,.05)" stroke-width="1"/>
+          <line x1="200" y1="0" x2="200" y2="300" stroke="rgba(0,212,170,.05)" stroke-width="1"/>
+          <line x1="300" y1="0" x2="300" y2="300" stroke="rgba(0,212,170,.05)" stroke-width="1"/>
+
+          <!-- Area labels -->
+          <text x="35" y="65" fill="rgba(90,109,154,0.6)" font-size="8" font-family="Inter">IKEJA</text>
+          <text x="140" y="218" fill="rgba(90,109,154,0.6)" font-size="8" font-family="Inter">LAGOS IS.</text>
+          <text x="260" y="213" fill="rgba(90,109,154,0.6)" font-size="7" font-family="Inter">LEKKI</text>
+          <text x="100" y="185" fill="rgba(90,109,154,0.6)" font-size="8" font-family="Inter">MAINLAND</text>
+          <text x="185" y="270" fill="rgba(0,80,160,0.5)" font-size="8" font-family="Inter">BIGHT OF BENIN</text>
+
+          <!-- Charging Stations -->
+          <circle cx="50" cy="48" r="5" fill="rgba(0,212,170,0.2)" stroke="#00d4aa" stroke-width="1.5"/>
+          <text x="50" y="40" fill="#00d4aa" font-size="7" text-anchor="middle" font-family="JetBrains Mono">STN-IKJ</text>
+
+          <circle cx="118" cy="222" r="5" fill="rgba(0,212,170,0.2)" stroke="#00d4aa" stroke-width="1.5"/>
+          <text x="118" y="237" fill="#00d4aa" font-size="7" text-anchor="middle" font-family="JetBrains Mono">STN-VIC</text>
+
+          <circle cx="167" cy="215" r="5" fill="rgba(0,212,170,0.2)" stroke="#00d4aa" stroke-width="1.5"/>
+          <text x="167" y="208" fill="#00d4aa" font-size="7" text-anchor="middle" font-family="JetBrains Mono">STN-LEK</text>
+
+          <circle cx="55" cy="150" r="5" fill="rgba(0,212,170,0.2)" stroke="#00d4aa" stroke-width="1.5"/>
+          <text x="55" y="143" fill="#00d4aa" font-size="7" text-anchor="middle" font-family="JetBrains Mono">STN-SUR</text>
+
+          <circle cx="295" cy="180" r="5" fill="rgba(0,212,170,0.2)" stroke="#00d4aa" stroke-width="1.5"/>
+          <text x="295" y="173" fill="#00d4aa" font-size="7" text-anchor="middle" font-family="JetBrains Mono">STN-AJH</text>
+
+          <!-- Vehicle markers (will be updated by JS) -->
+          <g id="map-markers"></g>
+        </svg>
+      </div>
+    </div>
+
+  </div><!-- /bottom-panel -->
+
+</div><!-- /wrap -->
+
+<!-- ── FOOTER ───────────────────────────────── -->
+<div class="wrap">
+  <footer>
+    <div class="footer-left">
+      ⚡ VoltIQ &nbsp;·&nbsp; AWS Bedrock Claude Haiku &nbsp;·&nbsp; DynamoDB Streams &nbsp;·&nbsp; API Gateway WebSocket
+    </div>
+    <div id="footer-status">EventBridge fires every 60s · Next update in <span id="countdown">--</span>s</div>
+  </footer>
+</div>
+
+<script>
+// ─── CONFIG ─────────────────────────────────────────────
+const WS_URL = 'wss://1zc6ie2yp3.execute-api.af-south-1.amazonaws.com/prod';
+const GAUGE_R = 50, GAUGE_C = 2 * Math.PI * GAUGE_R; // SVG circle circumference
+
+// Initial state seeded from DynamoDB (real values from last poll)
+const fleet = {
+  'VQ-001': { id:'VQ-001', battery:82.5, lat:6.4350, lng:3.4717, action:'', station:'', reasoning:'', savings:0, charging:false, updated:'--:--:--' },
+  'VQ-002': { id:'VQ-002', battery:64.4, lat:6.4281, lng:3.4219, action:'', station:'', reasoning:'', savings:0, charging:false, updated:'--:--:--' },
+  'VQ-003': { id:'VQ-003', battery:18.6, lat:6.6018, lng:3.3515, action:'', station:'', reasoning:'', savings:0, charging:false, updated:'--:--:--' },
+  'VQ-004': { id:'VQ-004', battery:88.2, lat:6.5005, lng:3.3567, action:'', station:'', reasoning:'', savings:0, charging:false, updated:'--:--:--' },
+  'VQ-005': { id:'VQ-005', battery:33.6, lat:6.4698, lng:3.6034, action:'', station:'', reasoning:'', savings:0, charging:false, updated:'--:--:--' },
+};
+
+let ws = null;
+let decisionCount = 0;
+let reconnectTimer = null;
+let countdownSecs = 60;
+let countdownTimer = null;
+
+// ─── COORDINATE PROJECTION ──────────────────────────────
+// Lagos bounds: lat [6.35, 6.65], lng [3.30, 3.65]
+function latLngToXY(lat, lng) {
+  const x = (lng - 3.30) / 0.35 * 340;
+  const y = (6.65 - lat) / 0.30 * 300;
+  return { x: Math.round(x), y: Math.round(y) };
+}
+
+// ─── COLOUR HELPERS ─────────────────────────────────────
+function batteryColor(pct) {
+  if (pct < 20) return '#ff3366';
+  if (pct < 50) return '#ffaa00';
+  if (pct < 80) return '#00d4aa';
+  return '#00e87a';
+}
+
+function actionLabel(a) {
+  if (a === 'CHARGE_NOW')   return '⚡ CHARGE NOW';
+  if (a === 'CHARGE_LATER') return '⏰ CHARGE LATER';
+  if (a === 'SKIP')         return '✓ SKIP';
+  return '… AWAITING AI';
+}
+
+function actionClass(a) {
+  if (a === 'CHARGE_NOW')   return 'now';
+  if (a === 'CHARGE_LATER') return 'later';
+  if (a === 'SKIP')         return 'skip';
+  return 'waiting';
+}
+
+function cardClass(v) {
+  if (v.battery < 20) return 'v-card critical';
+  if (v.battery < 50) return 'v-card warn';
+  return 'v-card';
+}
+
+// ─── RENDER FLEET GRID ───────────────────────────────────
+function renderGrid() {
+  const grid = document.getElementById('fleet-grid');
+  grid.innerHTML = '';
+  Object.values(fleet).forEach(v => {
+    const el = document.createElement('div');
+    el.id = `card-${v.id}`;
+    el.className = cardClass(v);
+    el.innerHTML = buildCard(v);
+    grid.appendChild(el);
+  });
+}
+
+function buildCard(v) {
+  const col = batteryColor(v.battery);
+  const filled = (v.battery / 100) * GAUGE_C;
+  const pctFmt = v.battery.toFixed(1);
+  const savFmt = v.savings > 0 ? `₦${Math.round(v.savings).toLocaleString()}` : '₦0';
+  const stFmt  = v.station || '—';
+  const ac     = actionClass(v.action);
+  const al     = actionLabel(v.action);
+  return `
+    <div class="vid">${v.id}</div>
+    <div class="gauge-wrap">
+      <svg viewBox="0 0 120 120">
+        <circle class="g-bg" cx="60" cy="60" r="${GAUGE_R}"/>
+        <circle class="g-fill" id="gauge-${v.id}" cx="60" cy="60" r="${GAUGE_R}"
+          stroke="${col}"
+          stroke-dasharray="${filled.toFixed(2)} ${GAUGE_C.toFixed(2)}"/>
+      </svg>
+      <div class="gauge-center">
+        <div class="g-pct" id="gpct-${v.id}" style="color:${col}">${pctFmt}</div>
+        <div class="g-unit">%</div>
+      </div>
+    </div>
+    <div class="badge ${ac}" id="badge-${v.id}">${al}</div>
+    <div class="v-info">
+      <div class="v-row"><span class="vr-k">Station</span><span class="vr-v" id="stn-${v.id}">${stFmt}</span></div>
+      <div class="v-row"><span class="vr-k">Charging</span><span class="vr-v">${v.charging ? '🔌 Yes' : 'No'}</span></div>
+      <div class="v-row"><span class="vr-k">Savings</span><span class="vr-v g" id="sav-${v.id}">${savFmt}</span></div>
+      <div class="v-row"><span class="vr-k">Updated</span><span class="vr-v" id="upd-${v.id}">${v.updated}</span></div>
+    </div>`;
+}
+
+// ─── UPDATE SINGLE CARD ─────────────────────────────────
+function updateCard(v) {
+  const card = document.getElementById(`card-${v.id}`);
+  if (!card) return;
+
+  // Card class (critical/warn glow)
+  card.className = cardClass(v) + ' updated';
+  setTimeout(() => card.classList.remove('updated'), 3000);
+
+  // Gauge
+  const col = batteryColor(v.battery);
+  const filled = (v.battery / 100) * GAUGE_C;
+  const g = document.getElementById(`gauge-${v.id}`);
+  if (g) {
+    g.style.stroke = col;
+    g.setAttribute('stroke-dasharray', `${filled.toFixed(2)} ${GAUGE_C.toFixed(2)}`);
+  }
+  const gp = document.getElementById(`gpct-${v.id}`);
+  if (gp) { gp.textContent = v.battery.toFixed(1); gp.style.color = col; }
+
+  // Badge
+  const b = document.getElementById(`badge-${v.id}`);
+  if (b) { b.className = `badge ${actionClass(v.action)}`; b.textContent = actionLabel(v.action); }
+
+  // Info
+  const stn = document.getElementById(`stn-${v.id}`);
+  if (stn) stn.textContent = v.station || '—';
+  const sav = document.getElementById(`sav-${v.id}`);
+  if (sav) sav.textContent = v.savings > 0 ? `₦${Math.round(v.savings).toLocaleString()}` : '₦0';
+  const upd = document.getElementById(`upd-${v.id}`);
+  if (upd) upd.textContent = v.updated;
+
+  updateMapMarker(v);
+}
+
+// ─── STATS BAR ──────────────────────────────────────────
+function recalcStats() {
+  const vehicles = Object.values(fleet);
+  const avgBat = vehicles.reduce((s, v) => s + v.battery, 0) / vehicles.length;
+  const totalSav = vehicles.reduce((s, v) => s + v.savings, 0);
+  document.getElementById('stat-avg').textContent = avgBat.toFixed(1) + '%';
+  const col = avgBat < 30 ? '#ff3366' : avgBat < 60 ? '#ffaa00' : '#fff';
+  document.getElementById('stat-avg').style.color = col;
+  document.getElementById('stat-decisions').textContent = decisionCount;
+  document.getElementById('stat-savings').textContent = '₦' + Math.round(totalSav).toLocaleString();
+}
+
+// ─── FEED ────────────────────────────────────────────────
+function addFeed(msg) {
+  const feed = document.getElementById('feed');
+  const empty = document.getElementById('feed-empty');
+  if (empty) empty.remove();
+
+  const cls = actionClass(msg.action);
+  const time = new Date().toLocaleTimeString();
+  const item = document.createElement('div');
+  item.className = `feed-item fi-${cls}`;
+  item.innerHTML = `
+    <div class="fi-vid">${msg.vehicle_id}</div>
+    <div class="fi-body">
+      <div class="fi-action" style="color:${cls==='now'?'var(--red)':cls==='later'?'var(--amber)':'var(--green)'}">
+        ${actionLabel(msg.action)} ${msg.station_id ? '→ ' + msg.station_id : ''}
+      </div>
+      <div class="fi-reason">${msg.reasoning || 'No reasoning provided.'}</div>
+      <div class="fi-time">${time} · bat: ${msg.battery_pct.toFixed(1)}% · ${msg.cost_naira > 0 ? '₦' + Math.round(msg.cost_naira) + ' est.' : 'no cost'}</div>
+    </div>`;
+  feed.insertBefore(item, feed.firstChild);
+  if (feed.children.length > 20) feed.removeChild(feed.lastChild);
+}
+
+// ─── MAP MARKERS ────────────────────────────────────────
+function updateMapMarker(v) {
+  const { x, y } = latLngToXY(v.lat, v.lng);
+  const g = document.getElementById('map-markers');
+  let m = document.getElementById(`marker-${v.id}`);
+  const col = batteryColor(v.battery);
+
+  if (!m) {
+    m = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    m.id = `marker-${v.id}`;
+    m.innerHTML = `
+      <circle r="7" fill="${col}" fill-opacity="0.25" stroke="${col}" stroke-width="1.5"/>
+      <circle r="3" fill="${col}"/>
+      <text y="-11" text-anchor="middle" font-size="8" font-family="JetBrains Mono" fill="${col}">${v.id}</text>`;
+    g.appendChild(m);
+  }
+  m.setAttribute('transform', `translate(${x},${y})`);
+  m.querySelector('circle').style.fill = col;
+  m.querySelector('circle').setAttribute('fill', col.replace(')', ',0.25)').replace('rgb', 'rgba') || col);
+}
+
+function initMapMarkers() {
+  Object.values(fleet).forEach(v => updateMapMarker(v));
+}
+
+// ─── WEBSOCKET ──────────────────────────────────────────
+function connect() {
+  const dot   = document.getElementById('ws-dot');
+  const label = document.getElementById('ws-label');
+  dot.className = 'ws-dot loading';
+  label.textContent = 'CONNECTING';
+  label.style.color = '#ffaa00';
+
+  try {
+    ws = new WebSocket(WS_URL);
+  } catch(e) {
+    scheduleReconnect();
+    return;
+  }
+
+  ws.onopen = () => {
+    dot.className = 'ws-dot';
+    label.textContent = 'LIVE';
+    label.style.color = 'var(--teal)';
+    resetCountdown();
+  };
+
+  ws.onmessage = (evt) => {
+    try {
+      const msg = JSON.parse(evt.data);
+      if (msg.type !== 'VEHICLE_UPDATE') return;
+
+      const v = fleet[msg.vehicle_id];
+      if (!v) return;
+
+      v.battery  = msg.battery_pct;
+      v.action   = msg.action;
+      v.station  = msg.station_id;
+      v.savings  = msg.total_saved;
+      v.charging = msg.is_charging;
+      v.lat      = msg.lat || v.lat;
+      v.lng      = msg.lng || v.lng;
+      v.updated  = new Date().toLocaleTimeString();
+
+      updateCard(v);
+      recalcStats();
+
+      if (msg.action && msg.action !== '') {
+        decisionCount++;
+        addFeed(msg);
+      }
+
+      resetCountdown();
+    } catch(e) { console.error('parse error:', e); }
+  };
+
+  ws.onerror = () => {
+    dot.className = 'ws-dot err';
+    label.textContent = 'ERROR';
+    label.style.color = 'var(--red)';
+  };
+
+  ws.onclose = () => {
+    dot.className = 'ws-dot err';
+    label.textContent = 'RECONNECTING';
+    label.style.color = 'var(--amber)';
+    scheduleReconnect();
+  };
+}
+
+function scheduleReconnect() {
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(connect, 5000);
+}
+
+// ─── COUNTDOWN TIMER ────────────────────────────────────
+function resetCountdown() {
+  countdownSecs = 60;
+  clearInterval(countdownTimer);
+  countdownTimer = setInterval(() => {
+    countdownSecs = Math.max(0, countdownSecs - 1);
+    const el = document.getElementById('countdown');
+    if (el) el.textContent = countdownSecs;
+  }, 1000);
+}
+
+// ─── CLOCK ──────────────────────────────────────────────
+function startClock() {
+  setInterval(() => {
+    const el = document.getElementById('clock');
+    if (el) el.textContent = new Date().toLocaleTimeString('en-GB', { hour12: false });
+  }, 1000);
+}
+
+// ─── BOOT ────────────────────────────────────────────────
+renderGrid();
+initMapMarkers();
+recalcStats();
+startClock();
+connect();
+resetCountdown();
+</script>
+</body>
+</html>
