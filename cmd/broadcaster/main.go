@@ -1,18 +1,6 @@
-// Lambda #3 — voltiq-broadcaster
-//
-// Triggered by DynamoDB Streams on the VehicleState table (NEW_IMAGE mode).
-// For each INSERT or MODIFY event it:
-//  1. Unmarshals the new VehicleState image from the stream record
-//  2. Builds a WebSocketMessage
-//  3. Scans the Connections table for all active browser sessions
-//  4. Calls API Gateway PostToConnection for each session
-//  5. Deletes stale connections (HTTP 410 Gone) from DynamoDB
-//
-// Env vars:
-//
-//	APIGW_ENDPOINT — full HTTPS URL of the API Gateway WebSocket stage
-//	                 e.g. https://abc123.execute-api.af-south-1.amazonaws.com/prod
-//	DYNAMO_REGION  — AWS region for DynamoDB (required)
+// Package main implements the voltiq-broadcaster Lambda function.
+// It is triggered by DynamoDB Streams on the VehicleState table to push updated
+// fleet states to all active WebSocket connections.
 package main
 
 import (

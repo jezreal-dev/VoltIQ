@@ -1,21 +1,7 @@
-// Lambda #2 — voltiq-processor
-//
-// Triggered by SQS queue "voltiq-telemetry".
-// For each TelemetryEvent message it:
-//  1. Decodes the event from the SQS message body (JSON string)
-//  2. Gets the current grid electricity rate (Lagos WAT tariff tiers)
-//  3. Loads all charging stations from DynamoDB, sorts by distance, picks nearest 2
-//  4. Reads previous VehicleState to carry forward cumulative savings
-//  5. Builds a Bedrock prompt and calls Claude Haiku for a ChargingDecision
-//  6. Accumulates savings into TotalSavingsNGN
-//  7. Writes updated VehicleState to DynamoDB (triggers broadcaster via DynamoDB Streams)
-//  8. Archives raw message body to S3
-//
-// Env vars:
-//
-//	DYNAMO_REGION  — AWS region for DynamoDB (required)
-//	BEDROCK_REGION — AWS region for Bedrock  (required, must have Haiku access)
-//	S3_BUCKET      — S3 bucket name for telemetry archive (required)
+// Package main implements the voltiq-processor Lambda function.
+// It consumes telemetry events from SQS, evaluates Lagos grid tariffs, queries
+// nearby charging stations, runs optimization decisions via Amazon Bedrock (Nova Lite),
+// and stores the resulting state in DynamoDB.
 package main
 
 import (

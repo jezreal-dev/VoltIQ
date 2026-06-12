@@ -1,17 +1,7 @@
-// Lambda #1 — voltiq-simulator
-//
-// Triggered by EventBridge every 60 seconds.
-// Simulates a Lagos EV fleet of 5 vehicles: drains battery, nudges GPS,
-// and emits a TelemetryEvent per vehicle into the SQS queue.
-//
-// State persistence: reads last BatteryPct from DynamoDB VehicleState so the
-// battery drains progressively across invocations. Falls back to hardcoded
-// defaults on first run or DynamoDB error.
-//
-// Env vars:
-//
-//	SQS_QUEUE_URL — full URL of the SQS telemetry queue (required)
-//	DYNAMO_REGION — AWS region for DynamoDB reads (default: af-south-1)
+// Package main implements the voltiq-simulator Lambda function.
+// It is triggered by EventBridge every 60 seconds to simulate a Lagos EV fleet
+// of 5 vehicles, progressively draining battery, drifting GPS coordinates,
+// and emitting telemetry events into SQS.
 package main
 
 import (

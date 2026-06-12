@@ -39,7 +39,7 @@ Nigerian tariff tiers (WAT = UTC+1):
 Always respond with valid JSON only. No text outside the JSON object.`
 )
 
-// ── Amazon Nova request/response types ──────────────────────────────────────
+// Amazon Nova API request and response definitions.
 
 // novaRequest is the InvokeModel body for Amazon Nova models.
 type novaRequest struct {
@@ -74,7 +74,7 @@ type novaResponse struct {
 	} `json:"output"`
 }
 
-// ── BedrockClient ────────────────────────────────────────────────────────────
+// BedrockClient handles execution of prompts on AWS Bedrock runtime.
 
 // BedrockClient wraps the AWS Bedrock runtime client.
 type BedrockClient struct {
