@@ -13,6 +13,6 @@ We actively support security updates for the following versions of VoltIQ:
 
 If you discover any security vulnerabilities, please do not open a public GitHub issue. Instead, report them directly to the development team:
 
-* Email: [jezreelglobal@gmail.com](mailto:jezreelglobal@gmail.com)
+* Email: [![Email](https://img.shields.io/badge/Email-jezreelglobal%40gmail.com-00d4aa?style=for-the-badge&logo=gmail&logoColor=040c1a)](mailto:jezreelglobal@gmail.com)
 
 Please include a detailed description of the vulnerability, steps to reproduce, and any proof of concept. We aim to acknowledge all reports within 48 hours and provide a patch timeline.
