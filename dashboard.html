@@ -411,6 +411,46 @@
       opacity: 0.9;
       transform: translateY(-1px);
     }
+    .nav-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      background: linear-gradient(135deg, var(--teal), var(--blue));
+      border: none;
+      border-radius: 8px;
+      padding: 6px 16px;
+      color: #040c1a;
+      font-size: 11px;
+      font-weight: 700;
+      text-decoration: none;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      box-shadow: 0 0 10px rgba(0, 212, 170, 0.15);
+    }
+    .nav-btn:hover {
+      opacity: 0.9;
+      transform: translateY(-1px);
+      box-shadow: 0 0 15px rgba(0, 212, 170, 0.3);
+    }
+    .nav-btn-disabled {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 5px 15px;
+      color: var(--dim);
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      cursor: not-allowed;
+    }
     @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
     @keyframes scaleUp { from { transform: scale(0.95); opacity: 0; } to { transform: scale(1); opacity: 1; } }
   </style>
@@ -597,6 +637,19 @@
 const WS_URL = 'wss://1zc6ie2yp3.execute-api.af-south-1.amazonaws.com/prod';
 const GAUGE_R = 50, GAUGE_C = 2 * Math.PI * GAUGE_R; // SVG circle circumference
 
+const stationCoordinates = {
+  'STN-LEKKI-A': { lat: 6.4350, lng: 3.4717 },
+  'STN-VICTORIA-A': { lat: 6.4281, lng: 3.4219 },
+  'STN-IKEJA-A': { lat: 6.6018, lng: 3.3515 },
+  'STN-SURULERE-A': { lat: 6.5005, lng: 3.3567 },
+  'STN-AJAH-A': { lat: 6.4698, lng: 3.6034 },
+  'STN-LEK': { lat: 6.4350, lng: 3.4717 },
+  'STN-VIC': { lat: 6.4281, lng: 3.4219 },
+  'STN-IKJ': { lat: 6.6018, lng: 3.3515 },
+  'STN-SUR': { lat: 6.5005, lng: 3.3567 },
+  'STN-AJH': { lat: 6.4698, lng: 3.6034 }
+};
+
 // Initial state seeded from DynamoDB (real values from last poll)
 const fleet = {
   'VQ-001': { id:'VQ-001', battery:82.5, lat:6.4350, lng:3.4717, action:'', station:'', reasoning:'', savings:0, charging:false, updated:'--:--:--' },
@@ -669,6 +722,16 @@ function buildCard(v) {
   const stFmt  = v.station || '—';
   const ac     = actionClass(v.action);
   const al     = actionLabel(v.action);
+
+  let navBtnHtml = '';
+  if (v.station && stationCoordinates[v.station]) {
+    const dest = stationCoordinates[v.station];
+    const url = `https://www.google.com/maps/dir/?api=1&origin=${v.lat},${v.lng}&destination=${dest.lat},${dest.lng}`;
+    navBtnHtml = `<a href="${url}" target="_blank" class="nav-btn">🧭 Route</a>`;
+  } else {
+    navBtnHtml = `<span class="nav-btn-disabled">🧭 Route</span>`;
+  }
+
   return `
     <div class="vid">${v.id}</div>
     <div class="gauge-wrap">
@@ -689,6 +752,7 @@ function buildCard(v) {
       <div class="v-row"><span class="vr-k">Charging</span><span class="vr-v">${v.charging ? '🔌 Yes' : 'No'}</span></div>
       <div class="v-row"><span class="vr-k">Savings</span><span class="vr-v g" id="sav-${v.id}">${savFmt}</span></div>
       <div class="v-row"><span class="vr-k">Updated</span><span class="vr-v" id="upd-${v.id}">${v.updated}</span></div>
+      <div class="v-row" style="border-bottom:none; margin-top:8px; justify-content:center;" id="nav-wrapper-${v.id}">${navBtnHtml}</div>
     </div>`;
 }
 
@@ -724,6 +788,18 @@ function updateCard(v) {
   const upd = document.getElementById(`upd-${v.id}`);
   if (upd) upd.textContent = v.updated;
 
+  // Update navigation button wrapper
+  const navWrapper = document.getElementById(`nav-wrapper-${v.id}`);
+  if (navWrapper) {
+    if (v.station && stationCoordinates[v.station]) {
+      const dest = stationCoordinates[v.station];
+      const url = `https://www.google.com/maps/dir/?api=1&origin=${v.lat},${v.lng}&destination=${dest.lat},${dest.lng}`;
+      navWrapper.innerHTML = `<a href="${url}" target="_blank" class="nav-btn">🧭 Route</a>`;
+    } else {
+      navWrapper.innerHTML = `<span class="nav-btn-disabled">🧭 Route</span>`;
+    }
+  }
+
   updateMapMarker(v);
 }
 
@@ -749,6 +825,16 @@ function addFeed(msg) {
   const time = new Date().toLocaleTimeString();
   const item = document.createElement('div');
   item.className = `feed-item fi-${cls}`;
+
+  let navBtnHtml = '';
+  if (msg.station_id && stationCoordinates[msg.station_id]) {
+    const dest = stationCoordinates[msg.station_id];
+    const lat = msg.lat || 6.45;
+    const lng = msg.lng || 3.4;
+    const url = `https://www.google.com/maps/dir/?api=1&origin=${lat},${lng}&destination=${dest.lat},${dest.lng}`;
+    navBtnHtml = `<a href="${url}" target="_blank" class="nav-btn" style="margin-top:8px;">🧭 Route</a>`;
+  }
+
   item.innerHTML = `
     <div class="fi-vid">${msg.vehicle_id}</div>
     <div class="fi-body">
@@ -757,6 +843,7 @@ function addFeed(msg) {
       </div>
       <div class="fi-reason">${msg.reasoning || 'No reasoning provided.'}</div>
       <div class="fi-time">${time} · bat: ${msg.battery_pct.toFixed(1)}% · ${msg.cost_naira > 0 ? '₦' + Math.round(msg.cost_naira) + ' est.' : 'no cost'}</div>
+      ${navBtnHtml ? `<div style="display:flex; margin-top:8px;">${navBtnHtml}</div>` : ''}
     </div>`;
   feed.insertBefore(item, feed.firstChild);
   if (feed.children.length > 20) feed.removeChild(feed.lastChild);
